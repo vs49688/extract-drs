@@ -1,7 +1,7 @@
 /*
  * AoE1 DRS extractor
  * https://github.com/vs49688/extract-drs
-
+ *
  * SPDX-License-Identifier: Apache-2.0
  * Copyright (c) 2019 Zane van Iperen
  *
@@ -17,13 +17,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-#include <cstdio>
-#include <cstring>
-#include <memory>
-
-struct stdio_deleter { void operator()(FILE *f) noexcept { fclose(f); } };
-using stdio_ptr = std::unique_ptr<FILE, stdio_deleter>;
+//
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <assert.h>
 
 #pragma pack(push, 1)
 typedef struct drs_header
@@ -90,7 +90,7 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	stdio_ptr f(fopen(argv[1], "rb"));
+	FILE *f = fopen(argv[1], "rb");
 	if(!f)
 	{
 		fprintf(stderr, "Unable to open \"%s\": %s\n", argv[1], strerror(errno));
@@ -98,46 +98,69 @@ int main(int argc, char **argv)
 	}
 
 	drs_header_t h;
-	if(fread(&h, sizeof(h), 1, f.get()) != 1)
-	{
-		perror("fread");
-		return 1;
-	}
+	drs_dinfo_t *dirinfo = NULL;
+	drs_dentry_t *dir = NULL;
+	uint32_t max_files = 0;
+
+	/* Read the header. */
+	if(fread(&h, sizeof(h), 1, f) != 1)
+		goto fop_failed;
 
 	if(h.version != 26)
 	{
 		fprintf(stderr, "Unknown file version, got %d, expected 26...\n", h.version);
-		return 1;
+		goto failed;
 	}
 
-	drs_dinfo_t *dirinfo = reinterpret_cast<drs_dinfo_t*>(alloca(sizeof(drs_dinfo_t) * h.directory_count));
-	fread(dirinfo, sizeof(drs_dinfo_t) * h.directory_count, 1, f.get());
+	dirinfo = alloca(sizeof(drs_dinfo_t) * h.directory_count);
+	if(fread(dirinfo, sizeof(drs_dinfo_t) * h.directory_count, 1, f) != 1)
+		goto fop_failed;
 
-	uint32_t max_files = 0;
+	max_files = 0;
+	for(size_t i = 0; i < h.directory_count; ++i)
 	{
-		for(size_t i = 0; i < h.directory_count; ++i)
-			max_files = std::max(max_files, dirinfo[i].file_count);
+		if(dirinfo[i].file_count > max_files)
+			max_files = dirinfo[i].file_count;
 	}
 
-	drs_dentry_t *dir = reinterpret_cast<drs_dentry_t*>(malloc(sizeof(drs_dentry_t) * max_files));
-	if(!dir)
+	if(!(dir = malloc(sizeof(drs_dentry_t) * max_files)))
 	{
 		perror("malloc");
-		return 1;
+		goto failed;
 	}
 
 	for(size_t d = 0; d < h.directory_count; ++d)
 	{
-		fseek(f.get(), dirinfo[d].offset, SEEK_SET);
-		fread(dir, sizeof(drs_dentry_t) * dirinfo[d].file_count, 1, f.get());
+		if(fseek(f, dirinfo[d].offset, SEEK_SET) < 0)
+			goto fop_failed;
+
+		if(fread(dir, sizeof(drs_dentry_t) * dirinfo[d].file_count, 1, f) != 1)
+			goto fop_failed;
 
 		for(size_t i = 0; i < dirinfo[d].file_count; ++i)
 		{
-			if(drs_write_file(f.get(), &dirinfo[d], &dir[i]) < 0)
+			if(drs_write_file(f, &dirinfo[d], &dir[i]) < 0)
+			{
 				fprintf(stderr, "Error extracting file %u: %s\n", dir[i].id, strerror(errno));
+				goto failed;
+			}
 		}
 	}
 
 	free(dir);
+	fclose(f);
 	return 0;
+
+fop_failed:
+	if(ferror(f))
+		fprintf(stderr, "%s\n", strerror(errno));
+	else if(feof(f))
+		fprintf(stderr, "Hit premature EOF\n");
+
+failed:
+	if(dir)
+		free(dir);
+
+	fclose(f);
+	return 1;
 }
