@@ -74,6 +74,8 @@ static int drs_write_file(FILE *f, drs_dinfo_t *info, drs_dentry_t *entry)
 	if(fwrite(buf, entry->size, 1, of) != 1)
 		goto io_fail;
 
+	free(buf);
+	fclose(of);
 	return 0;
 io_fail:
 	fclose(of);
